@@ -67,3 +67,7 @@ Real authentication, durable ticketing integration, background monitoring, and p
 ## AI tool usage
 
 Codex was used to accelerate extraction of the supplied files, scaffold the application, and assist with testing and documentation. The implementation, source-authority policy, safety boundaries, and final review remain explicitly documented in this repository.
+
+## hosted on
+
+https://parcelpilot-support-agent-6cgeymjjm2crpgbb4mdapt.streamlit.app/
