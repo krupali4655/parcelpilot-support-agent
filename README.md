@@ -9,7 +9,7 @@ A customer-facing, evidence-grounded support agent for the CalQuity assessment. 
 3. Keep the supplied assessment files in `data/`.
 4. Start the app: `streamlit run app.py`
 
-No API key is required for the assessment demo: the included narrow decision agent handles the supplied source pack deterministically. `OPENAI_API_KEY` is reserved for a production LLM orchestration layer and is intentionally not required to expose or test the application.
+A Groq API key is required to run the app. Locally, paste it into the gitignored `.env` file: `GROQ_API_KEY="your-key"`. For Streamlit Cloud, add the same key under **Settings → Secrets**. The model receives only the customer's message and can select a fixed intent; it never receives order data or source documents, and deterministic tools remain responsible for authorization, policy, and actions.
 
 ## Demo flow
 
@@ -25,7 +25,7 @@ For the full request-to-action flow and ready-to-use diagrams, see [PROJECT_WORK
 
 ### Agent design
 
-`SupportAgent` classifies natural-language support intent, selects the required tools, then applies small deterministic decision policies. The narrow implementation is intentional: it makes source precedence and action safety auditable for a high-risk financial/logistics support workflow. A production model can use function calling to select the same tools, but cannot bypass their authorization and policy checks.
+When enabled, the Groq router first classifies natural-language support intent into a fixed allow-list. `SupportAgent` then selects the required tools and applies deterministic decision policies. This split makes source precedence and action safety auditable for a high-risk financial/logistics workflow: the LLM cannot bypass tenant filtering, policy checks, or the confirmation gate.
 
 ### Tools
 
@@ -58,7 +58,7 @@ The **Internal signals** tab surfaces P1 candidate incidents, corroborates known
 
 ### Intentionally omitted
 
-Real authentication, durable ticketing integration, background monitoring, model-provider orchestration, and production observability are mocked or scoped out to keep the submission focused and runnable with only the supplied data pack.
+Real authentication, durable ticketing integration, background monitoring, and production observability are mocked or scoped out to keep the submission focused and runnable with only the supplied data pack.
 
 ### Success metric
 

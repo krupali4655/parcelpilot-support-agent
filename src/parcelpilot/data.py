@@ -26,10 +26,25 @@ class ParcelPilotStore:
     def __init__(self, data_dir: Path = DATA_DIR) -> None:
         self.data_dir = data_dir
         workbook = data_dir / "ParcelPilot_Assessment_Data.xlsx"
+        readme = pd.read_excel(workbook, sheet_name="README", header=None).fillna("")
+        self.snapshot_time = self._snapshot_time_from_readme(readme)
         self.accounts = pd.read_excel(workbook, sheet_name="accounts").fillna("")
         self.orders = pd.read_excel(workbook, sheet_name="orders").fillna("")
         self.tickets = pd.read_excel(workbook, sheet_name="tickets").fillna("")
         self.documents = self._load_documents()
+        self.contract_terms = self._load_contract_terms()
+
+    @staticmethod
+    def _snapshot_time_from_readme(readme: pd.DataFrame) -> pd.Timestamp:
+        snapshot_rows = readme.loc[readme.iloc[:, 0].astype(str).str.strip() == "Dataset snapshot"]
+        if snapshot_rows.empty:
+            return SNAPSHOT_TIME  # Fallback for malformed assessment workbooks.
+        snapshot_text = str(snapshot_rows.iloc[0, 1]).strip()
+        try:
+            datetime_text, timezone_name = snapshot_text.rsplit(" ", 1)
+            return pd.Timestamp(datetime_text, tz=timezone_name)
+        except (TypeError, ValueError):
+            return SNAPSHOT_TIME  # Fallback for unparseable README timestamps.
 
     def _load_documents(self) -> dict[str, str]:
         docs: dict[str, str] = {}
@@ -37,6 +52,34 @@ class ParcelPilotStore:
             text = "\n".join(page.extract_text() or "" for page in PdfReader(path).pages)
             docs[path.name] = re.sub(r"\s+", " ", text).strip()
         return docs
+
+    def _load_contract_terms(self) -> dict[str, dict[str, Any]]:
+        """Extract the small set of active customer-specific overrides from contract text."""
+        terms_by_account: dict[str, dict[str, Any]] = {}
+        for _, account in self.accounts.iterrows():
+            contract_file = str(account.get("contract_file", ""))
+            text = self.documents.get(contract_file, "")
+            if not contract_file or not text:
+                continue
+            terms: dict[str, Any] = {}
+            if re.search(r"BOOKED shipment before pickup with no cancellation fee", text, re.IGNORECASE):
+                terms["cancellation_fee_waived_when_booked"] = True
+            credit_match = re.search(r"more than (\d+) hours.*?fixed INR ([\d,]+) service credit", text, re.IGNORECASE)
+            if credit_match:
+                terms["credit_late_hours_threshold"] = int(credit_match.group(1))
+                terms["credit_amount_inr"] = int(credit_match.group(2).replace(",", ""))
+            sla_match = re.search(r"P1:\s*(.*?)\s*● P2:\s*(.*?)\s*● P3:\s*(.*?)(?:\s*2\. |\s*● No weekend|$)", text)
+            if sla_match:
+                terms.update({
+                    "sla_p1": sla_match.group(1).strip(),
+                    "sla_p2": sla_match.group(2).strip(),
+                    "sla_p3": sla_match.group(3).strip(),
+                })
+            terms_by_account[str(account["account_id"])] = terms
+        return terms_by_account
+
+    def terms_for_customer(self, auth: AuthContext) -> dict[str, Any]:
+        return self.contract_terms.get(auth.account_id, {})
 
     def account(self, auth: AuthContext) -> dict[str, Any]:
         row = self.accounts.loc[self.accounts.account_id == auth.account_id]
@@ -51,6 +94,14 @@ class ParcelPilotStore:
             & (self.orders.account_id == auth.account_id)
         ]
         return None if row.empty else row.iloc[0].to_dict()
+
+    def open_orders_for_customer(self, auth: AuthContext) -> list[dict[str, Any]]:
+        """Return non-delivered orders belonging to the authenticated customer."""
+        rows = self.orders.loc[
+            (self.orders.account_id == auth.account_id)
+            & (self.orders.status != "DELIVERED")
+        ]
+        return rows.to_dict(orient="records")
 
     def tickets_for_customer(self, auth: AuthContext) -> list[dict[str, Any]]:
         rows = self.tickets.loc[self.tickets.account_id == auth.account_id]
@@ -90,8 +141,10 @@ class ParcelPilotStore:
             return "Current operational source"
         return "Context only"
 
-    def proactive_signals(self) -> list[dict[str, str]]:
+    def proactive_signals(self, auth: AuthContext) -> list[dict[str, str]]:
         """Internal-only analysis. Customer tool paths never call this method."""
+        if auth.role != "internal_support":
+            raise PermissionError("Proactive signals are restricted to internal support/operations roles.")
         tickets = self.tickets.loc[self.tickets.status == "open"]
         signals: list[dict[str, str]] = []
         p1 = tickets[tickets.subject.str.contains("shipment creation|API key", case=False, regex=True)]

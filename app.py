@@ -1,23 +1,47 @@
 from __future__ import annotations
 
 import sys
+import os
 from pathlib import Path
 
 import streamlit as st
+from dotenv import load_dotenv
 
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 from parcelpilot.agent import SupportAgent
 from parcelpilot.data import AuthContext, ParcelPilotStore
+from parcelpilot.llm import GroqIntentRouter
 
 
 st.set_page_config(page_title="ParcelPilot Support", page_icon="✦", layout="wide")
+load_dotenv(Path(__file__).parent / ".env")
 
 @st.cache_resource
 def services() -> tuple[ParcelPilotStore, SupportAgent]:
     store = ParcelPilotStore()
     return store, SupportAgent(store)
 
+
+def setting(name: str, default: str = "") -> str:
+    """Read the local .env file first, then Streamlit Cloud's server-side secrets."""
+    if value := os.environ.get(name):
+        return value
+    try:
+        return str(st.secrets.get(name, default))
+    except Exception:
+        return default
+
+
+@st.cache_resource
+def intent_router(api_key: str, model: str) -> GroqIntentRouter:
+    return GroqIntentRouter(api_key or None, model)
+
 store, agent = services()
+groq_api_key = setting("GROQ_API_KEY")
+if not groq_api_key:
+    st.error("Groq API key required. Add GROQ_API_KEY to .env locally, then restart Streamlit.")
+    st.stop()
+router = intent_router(groq_api_key, setting("GROQ_MODEL", "llama-3.3-70b-versatile"))
 st.markdown("""<style>
   .stApp { background: #07111f; color: #e7eef9; }
   [data-testid='stSidebar'] { background: #0b1b30; }
@@ -48,6 +72,7 @@ with st.sidebar:
     st.divider()
     st.caption("Reference snapshot: 16 Aug 2026, 11:00 IST")
     st.caption("Sources: supplied assessment pack only")
+    st.caption("LLM routing: Groq enabled")
 
 auth = AuthContext(account_id=account_id, account_name=chosen, role=role)
 
@@ -78,11 +103,15 @@ with chat_tab:
                 st.caption("Tools: " + " → ".join(msg["tools"]))
             if msg.get("sources"):
                 st.caption("Sources: " + " · ".join(msg["sources"]))
+            if msg.get("confidence"):
+                st.caption(f"Confidence: {msg['confidence']}")
     prompt = st.chat_input("e.g. Can I cancel ORD-1001 without a fee?")
     if prompt:
         st.session_state.messages.append({"role": "user", "content": prompt})
-        reply = agent.respond(prompt, auth)
-        st.session_state.messages.append({"role": "assistant", "content": reply.answer, "tools": reply.tools, "sources": reply.sources, "draft": reply.action_draft})
+        route = router.route(prompt)
+        reply = agent.respond(prompt, auth, routed_intent=route.intent, routed_order_id=route.order_id)
+        tools = (["llm_intent_router"] if route.provider == "groq" else []) + reply.tools
+        st.session_state.messages.append({"role": "assistant", "content": reply.answer, "tools": tools, "sources": reply.sources, "draft": reply.action_draft, "confidence": reply.confidence})
         st.rerun()
     if st.session_state.messages and st.session_state.messages[-1].get("draft"):
         draft = st.session_state.messages[-1]["draft"]
@@ -107,7 +136,7 @@ if ops_tab is not None:
     with ops_tab:
         st.title("Operations signal desk")
         st.caption("Available only to the authorised internal-support role in this mock authentication flow.")
-        for signal in store.proactive_signals():
+        for signal in store.proactive_signals(auth):
             st.markdown(f"<div class='signal'><b>{signal['priority']} · {signal['title']}</b><br/>{signal['detail']}</div><br/>", unsafe_allow_html=True)
 
 with trust_tab:
