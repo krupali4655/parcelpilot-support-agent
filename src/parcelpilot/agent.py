@@ -43,6 +43,32 @@ class SupportAgent:
             return None
         return pd.Timestamp(value, tz="Asia/Kolkata")
 
+    @staticmethod
+    def classify_intent(text: str, routed_intent: str | None = None) -> str:
+        """Return one ordered support intent for a customer message.
+
+        Explicit customer action words take precedence over softer contextual
+        signals. This same result is used for candidate resolution and final
+        dispatch, so those stages cannot choose different workflows.
+        """
+        if "escalat" in text:
+            return "escalation"
+        if "cancel" in text or "cancellation" in text:
+            return "cancellation"
+        if "credit" in text or "compensat" in text:
+            return "service_credit"
+        if "late" in text and ("pickup" in text or "shipment" in text or "order" in text):
+            return "service_credit"
+        if routed_intent in {"service_credit", "webhook_delay", "bulk_upload", "sla", "escalation", "cancellation"}:
+            return routed_intent
+        if "bulk" in text or "upload" in text:
+            return "bulk_upload"
+        if "sla" in text or "response" in text or "support target" in text:
+            return "sla"
+        if "booked" in text and ("pickup" in text or "driver" in text):
+            return "webhook_delay"
+        return "unknown"
+
     def _historical_guidance_note(self, auth: AuthContext, keyword: str) -> str:
         for ticket in self.store.tickets_for_customer(auth):
             subject = str(ticket.get("subject", "")).lower()
@@ -63,12 +89,8 @@ class SupportAgent:
         # identifier. Only an ID explicitly present in the customer message is
         # eligible for lookup; otherwise the safe account-scoped resolver runs.
         order_id = self._order_id(message)
-        cancellation_intent = routed_intent == "cancellation" or "cancel" in text or "cancellation" in text
-        credit_intent = routed_intent == "service_credit" or "credit" in text or "late" in text or "pickup" in text
-        webhook_intent = routed_intent == "webhook_delay" or ("booked" in text and ("pickup" in text or "driver" in text))
-        bulk_intent = routed_intent == "bulk_upload" or "bulk" in text or "upload" in text
-        sla_intent = routed_intent == "sla" or "sla" in text or "response" in text or "support target" in text
-        if routed_intent == "escalation" or "escalat" in text:
+        intent = self.classify_intent(text, routed_intent)
+        if intent == "escalation":
             account = self.store.account(auth)
             priority_note = " Premium-support account: prioritise review." if account.get("premium_support") else ""
             return AgentReply(
@@ -76,9 +98,9 @@ class SupportAgent:
                 ["prepare_escalation"], [],
                 {"title": "Customer-requested support escalation", "reason": message[:300] + priority_note}, "Medium"
             )
-        if order_id is None and (cancellation_intent or credit_intent):
+        if order_id is None and intent in {"cancellation", "service_credit"}:
             candidates = self.store.open_orders_for_customer(auth)
-            if credit_intent:
+            if intent == "service_credit":
                 candidates = [
                     order for order in candidates
                     if order["status"] == "BOOKED" and not order["pickup_actual_at"] and order["carrier_fault"]
@@ -101,15 +123,15 @@ class SupportAgent:
                     f"I found multiple orders matching that description: {candidate_ids}. Please specify which order ID you mean.",
                     ["structured_lookup"], [], confidence="Medium"
                 )
-        if order_id and cancellation_intent:
+        if order_id and intent == "cancellation":
             return self._cancellation(order_id, auth)
-        if webhook_intent:
-            return self._webhook_delay(auth, order_id)
-        if order_id and credit_intent:
+        if order_id and intent == "service_credit":
             return self._service_credit(order_id, auth)
-        if bulk_intent:
+        if intent == "webhook_delay":
+            return self._webhook_delay(auth, order_id)
+        if intent == "bulk_upload":
             return self._bulk_upload(auth)
-        if sla_intent:
+        if intent == "sla":
             return self._sla(auth)
         return AgentReply(
             "I can help with orders, cancellations, failed-pickup credits, support SLAs, bulk uploads, and known issues. Please include an order ID where relevant. I will escalate questions that need judgment or evidence not in the supplied sources.",

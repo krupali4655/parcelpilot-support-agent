@@ -133,3 +133,29 @@ def test_llm_route_only_changes_intent_not_authorization_or_policy():
         routed_intent="service_credit",
     )
     assert "INR 300" in reply.answer
+
+
+def test_mixed_cancel_and_late_keywords_still_resolves_valid_cancellation():
+    reply = agent().respond(
+        "My pickup was late, can I cancel my order without a fee?",
+        AuthContext("ACCT-001", "Northstar Logistics"),
+    )
+    assert "ORD-1001" in reply.answer
+    assert "don't see an order" not in reply.answer.lower()
+
+
+def test_pickup_window_question_is_not_treated_as_credit_denial():
+    reply = agent().respond(
+        "What is the pickup window for ORD-1001?",
+        AuthContext("ACCT-001", "Northstar Logistics"),
+    )
+    assert "cannot approve a credit" not in reply.answer.lower()
+
+
+def test_explicit_credit_question_is_not_swallowed_by_webhook_heuristic():
+    reply = agent().respond(
+        "My BOOKED shipment pickup was late, do I get a credit?",
+        AuthContext("ACCT-002", "LumenWorks"),
+    )
+    assert "INR 300" in reply.answer
+    assert "webhook-delay issue does not apply" not in reply.answer
